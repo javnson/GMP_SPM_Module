@@ -1,0 +1,25 @@
+--cpu=Cortex-M4.fp.sp
+"stm32f411ceu6_spm\startup_stm32f411xe.o"
+"stm32f411ceu6_spm\main.o"
+"stm32f411ceu6_spm\stm32f4xx_it.o"
+"stm32f411ceu6_spm\stm32f4xx_hal_msp.o"
+"stm32f411ceu6_spm\stm32f4xx_hal_adc.o"
+"stm32f411ceu6_spm\stm32f4xx_hal_adc_ex.o"
+"stm32f411ceu6_spm\stm32f4xx_hal_rcc.o"
+"stm32f411ceu6_spm\stm32f4xx_hal_rcc_ex.o"
+"stm32f411ceu6_spm\stm32f4xx_hal_flash.o"
+"stm32f411ceu6_spm\stm32f4xx_hal_flash_ex.o"
+"stm32f411ceu6_spm\stm32f4xx_hal_flash_ramfunc.o"
+"stm32f411ceu6_spm\stm32f4xx_hal_gpio.o"
+"stm32f411ceu6_spm\stm32f4xx_hal_dma_ex.o"
+"stm32f411ceu6_spm\stm32f4xx_hal_dma.o"
+"stm32f411ceu6_spm\stm32f4xx_hal_pwr.o"
+"stm32f411ceu6_spm\stm32f4xx_hal_pwr_ex.o"
+"stm32f411ceu6_spm\stm32f4xx_hal_cortex.o"
+"stm32f411ceu6_spm\stm32f4xx_hal.o"
+"stm32f411ceu6_spm\stm32f4xx_hal_exti.o"
+"stm32f411ceu6_spm\system_stm32f4xx.o"
+--strict --scatter "STM32F411CEU6_SPM\STM32F411CEU6_SPM.sct"
+--summary_stderr --info summarysizes --map --load_addr_map_info --xref --callgraph --symbols
+--info sizes --info totals --info unused --info veneers
+--list "STM32F411CEU6_SPM.map" -o STM32F411CEU6_SPM\STM32F411CEU6_SPM.axf
