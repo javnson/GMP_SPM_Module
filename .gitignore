@@ -59,3 +59,6 @@ STM32F411CEU6_SPM/Drivers/**
 
 # all build information from Keil
 *.crf
+
+# CMake/Ninja build tree
+STM32F411CEU6_SPM/build/
