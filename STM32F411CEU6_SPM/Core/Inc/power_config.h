@@ -44,5 +44,6 @@
 #define POWER_SYS_BREATHE_PERIOD_MS         2000U
 #define POWER_FAULT_BLINK_PERIOD_MS          500U
 #define POWER_LED5_PATTERN_PERIOD_MS        1000U
+#define POWER_SC_LED_PERIOD_MS              1000U
 
 #endif /* POWER_CONFIG_H */

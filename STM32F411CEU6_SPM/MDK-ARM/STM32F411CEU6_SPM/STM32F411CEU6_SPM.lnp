@@ -6,6 +6,7 @@
 "stm32f411ceu6_spm\freertos.o"
 "stm32f411ceu6_spm\stm32f4xx_it.o"
 "stm32f411ceu6_spm\stm32f4xx_hal_msp.o"
+"stm32f411ceu6_spm\syscalls.o"
 "stm32f411ceu6_spm\stm32f4xx_hal_pcd.o"
 "stm32f411ceu6_spm\stm32f4xx_hal_pcd_ex.o"
 "stm32f411ceu6_spm\stm32f4xx_ll_usb.o"

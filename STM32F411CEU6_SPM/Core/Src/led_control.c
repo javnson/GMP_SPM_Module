@@ -112,7 +112,7 @@ void LedControl_SetLed5(bool input_valid, bool charging, bool manual_test)
 void LedControl_SetSupercap(uint32_t sc_mv)
 {
   uint32_t percent;
-  uint32_t period_ms;
+  uint32_t on_ms;
 
   if (sc_mv >= POWER_SC_CHARGE_COMPLETE_MV)
   {
@@ -126,8 +126,8 @@ void LedControl_SetSupercap(uint32_t sc_mv)
   {
     percent = ((sc_mv - POWER_SC_BACKUP_CUTOFF_MV) * 100U) /
               (POWER_SC_CHARGE_COMPLETE_MV - POWER_SC_BACKUP_CUTOFF_MV);
-    period_ms = 1200U - (percent * 9U);
-    SetCommand(&sc_led, LED_PATTERN_BLINK, period_ms, period_ms / 2U);
+    on_ms = (percent * POWER_SC_LED_PERIOD_MS) / 100U;
+    SetCommand(&sc_led, LED_PATTERN_BLINK, POWER_SC_LED_PERIOD_MS, on_ms);
   }
 }
 
