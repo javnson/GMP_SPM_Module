@@ -45,9 +45,10 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/power_control.c
+    Core/Src/led_control.c
 )
 
-set_source_files_properties(Core/Src/power_control.c PROPERTIES
+set_source_files_properties(Core/Src/power_control.c Core/Src/led_control.c PROPERTIES
     COMPILE_OPTIONS "-Wall;-Wextra;-Werror"
 )
 

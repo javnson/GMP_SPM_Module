@@ -1,6 +1,7 @@
 #include "power_control.h"
 
 #include "cmsis_os2.h"
+#include "led_control.h"
 #include "main.h"
 #include "power_config.h"
 #include "usbd_cdc_if.h"
@@ -11,10 +12,11 @@
 
 typedef enum
 {
-  POWER_MODE_NORMAL = 0,
+  POWER_MODE_STARTUP_CHARGE = 0,
+  POWER_MODE_STARTUP_BOOST_SETTLE,
+  POWER_MODE_NORMAL,
   POWER_MODE_BACKUP,
-  POWER_MODE_MANUAL_TEST,
-  POWER_MODE_TRANSFER_TO_MAIN
+  POWER_MODE_MANUAL_TEST
 } PowerMode;
 
 enum
@@ -51,13 +53,14 @@ typedef struct
   ADC_HandleTypeDef *hadc;
   I2C_HandleTypeDef *hi2c;
   uint32_t input_mv;
+  uint32_t input_sample_mv;
   uint32_t bus_mv;
   uint32_t sc_mv;
   uint32_t faults;
   uint32_t previous_faults;
   uint32_t alarm_faults;
-  uint32_t transfer_started_at;
   uint32_t charge_full_since;
+  uint32_t boost_settle_started_at;
   uint32_t rapid_drop_until;
   uint32_t telemetry_at;
   uint32_t input_invalid_since;
@@ -70,9 +73,14 @@ typedef struct
   bool output_enabled;
   bool charge_requested;
   bool charge_enabled;
+  bool boost_enabled;
+  bool boost_forced_off;
+  bool output_forced_off;
+  bool startup_complete;
   bool alarm_muted;
   bool adc_failed;
   bool measurements_initialized;
+  bool record_dirty;
   PowerMode mode;
   Button mute_button;
   Button test_button;
@@ -84,6 +92,7 @@ typedef struct
 #define POWER_RECORD_VERSION 1UL
 
 static PowerContext power;
+volatile PowerDebugSnapshot g_power_debug;
 
 static uint32_t RecordChecksum(const PersistentRecord *record)
 {
@@ -127,6 +136,7 @@ static void RecordSave(void)
                           I2C_MEMADD_SIZE_8BIT, &bytes[16],
                           sizeof(power.record) - 16U, POWER_EEPROM_TIMEOUT_MS);
   osDelay(POWER_EEPROM_WRITE_CYCLE_MS);
+  power.record_dirty = false;
 }
 
 static uint32_t ReadAdcMillivolts(uint32_t channel)
@@ -185,40 +195,42 @@ static bool ButtonPressed(Button *button, uint32_t now)
   return false;
 }
 
-static void SetLed(GPIO_TypeDef *port, uint16_t pin, bool on)
-{
-  HAL_GPIO_WritePin(port, pin, on ? GPIO_PIN_RESET : GPIO_PIN_SET);
-}
-
 static void UpdateMeasurements(uint32_t now)
 {
-  uint32_t input_sample;
   uint32_t bus_sample;
   uint32_t sc_sample;
 
   power.adc_failed = false;
   sc_sample = ReadAdcMillivolts(ADC_CHANNEL_1);
-  input_sample = ReadAdcMillivolts(ADC_CHANNEL_2);
+  power.input_sample_mv = ReadAdcMillivolts(ADC_CHANNEL_2);
   bus_sample = ReadAdcMillivolts(ADC_CHANNEL_3);
   if (!power.adc_failed)
   {
     if (!power.measurements_initialized)
     {
       power.sc_mv = sc_sample;
-      power.input_mv = input_sample;
+      power.input_mv = power.input_sample_mv;
       power.bus_mv = bus_sample;
-      power.input_valid = input_sample >= POWER_INPUT_UV_RECOVER_MV;
+      power.input_valid = power.input_sample_mv >= POWER_INPUT_UV_RECOVER_MV;
       power.measurements_initialized = true;
     }
     else
     {
       power.sc_mv = FilterVoltage(power.sc_mv, sc_sample);
-      power.input_mv = FilterVoltage(power.input_mv, input_sample);
+      power.input_mv = FilterVoltage(power.input_mv, power.input_sample_mv);
       power.bus_mv = FilterVoltage(power.bus_mv, bus_sample);
     }
   }
 
-  if (power.input_valid)
+  /* An emergency raw threshold bypasses the normal debounce so BOOST can take
+   * over quickly if the source disappears while the charger is active. */
+  if (power.input_sample_mv < POWER_INPUT_EMERGENCY_TRIP_MV)
+  {
+    power.input_valid = false;
+    power.input_invalid_since = 0U;
+    power.input_valid_since = 0U;
+  }
+  else if (power.input_valid)
   {
     if (power.input_mv < POWER_INPUT_UV_TRIP_MV)
     {
@@ -267,108 +279,192 @@ static void UpdateMeasurements(uint32_t now)
   }
 }
 
-static void EnterBackup(uint32_t now)
+static void EnterBackup(void)
 {
-  (void)now;
   if (power.mode != POWER_MODE_BACKUP)
   {
     power.mode = POWER_MODE_BACKUP;
     ++power.record.backup_count;
-    RecordSave();
+    power.record_dirty = true;
   }
 }
 
-static void UpdateMode(uint32_t now, bool test_pressed)
+static bool UpdateChargeCompletion(uint32_t now)
 {
-  if (!power.input_valid && power.mode != POWER_MODE_BACKUP)
+  if (!power.charge_requested)
   {
-    EnterBackup(now);
-  }
-  else if (test_pressed && power.mode == POWER_MODE_NORMAL && power.input_valid &&
-           power.sc_mv >= POWER_SC_MANUAL_TEST_STOP_MV)
-  {
-    power.mode = POWER_MODE_MANUAL_TEST;
-  }
-  else if (test_pressed && power.mode == POWER_MODE_MANUAL_TEST)
-  {
-    power.mode = POWER_MODE_TRANSFER_TO_MAIN;
-    power.transfer_started_at = now;
-  }
-
-  if (power.mode == POWER_MODE_BACKUP && power.input_valid)
-  {
-    power.mode = POWER_MODE_TRANSFER_TO_MAIN;
-    power.transfer_started_at = now;
-  }
-  else if (power.mode == POWER_MODE_MANUAL_TEST &&
-           power.sc_mv < POWER_SC_MANUAL_TEST_STOP_MV)
-  {
-    if (power.input_valid)
-    {
-      power.mode = POWER_MODE_TRANSFER_TO_MAIN;
-      power.transfer_started_at = now;
-    }
-    else
-    {
-      EnterBackup(now);
-    }
-  }
-  else if (power.mode == POWER_MODE_TRANSFER_TO_MAIN)
-  {
-    if (!power.input_valid)
-      EnterBackup(now);
-    else if ((now - power.transfer_started_at) >= POWER_TRANSFER_OVERLAP_MS)
-      power.mode = POWER_MODE_NORMAL;
-  }
-
-  switch (power.mode)
-  {
-    case POWER_MODE_NORMAL:
-      HAL_GPIO_WritePin(CTRL_DC_INPUT_GPIO_Port, CTRL_DC_INPUT_Pin, GPIO_PIN_SET);
-      HAL_GPIO_WritePin(SC_OUTPUT_EN_GPIO_Port, SC_OUTPUT_EN_Pin, GPIO_PIN_RESET);
-      break;
-    case POWER_MODE_TRANSFER_TO_MAIN:
-      HAL_GPIO_WritePin(CTRL_DC_INPUT_GPIO_Port, CTRL_DC_INPUT_Pin, GPIO_PIN_SET);
-      HAL_GPIO_WritePin(SC_OUTPUT_EN_GPIO_Port, SC_OUTPUT_EN_Pin, GPIO_PIN_SET);
-      break;
-    case POWER_MODE_BACKUP:
-    case POWER_MODE_MANUAL_TEST:
-    default:
-      HAL_GPIO_WritePin(CTRL_DC_INPUT_GPIO_Port, CTRL_DC_INPUT_Pin, GPIO_PIN_RESET);
-      HAL_GPIO_WritePin(SC_OUTPUT_EN_GPIO_Port, SC_OUTPUT_EN_Pin,
-                        power.sc_mv >= POWER_SC_BACKUP_CUTOFF_MV ? GPIO_PIN_SET : GPIO_PIN_RESET);
-      break;
-  }
-}
-
-static void UpdateCharge(uint32_t now, bool charge_pressed)
-{
-  if (charge_pressed)
-  {
-    power.charge_requested = !power.charge_requested;
     power.charge_full_since = 0U;
+    return false;
   }
 
-  if (power.sc_mv < POWER_SC_CHARGE_REARM_MV)
-    power.charge_full_since = 0U;
-
-  power.charge_enabled = power.charge_requested && power.input_valid &&
-                         power.mode == POWER_MODE_NORMAL;
-  if (power.charge_enabled && power.sc_mv >= POWER_SC_CHARGE_COMPLETE_MV)
+  if (power.sc_mv >= POWER_SC_CHARGE_COMPLETE_MV)
   {
     if (power.charge_full_since == 0U)
       power.charge_full_since = now;
     else if ((now - power.charge_full_since) >= POWER_SC_CHARGE_HOLD_MS)
     {
       power.charge_requested = false;
-      power.charge_enabled = false;
+      power.charge_full_since = 0U;
+      return true;
     }
   }
-  HAL_GPIO_WritePin(SC_CHARGE_EN_GPIO_Port, SC_CHARGE_EN_Pin,
-                    power.charge_enabled ? GPIO_PIN_SET : GPIO_PIN_RESET);
+  else
+  {
+    /* The 5 s confirmation must be continuous at or above 10.5 V. */
+    power.charge_full_since = 0U;
+  }
+  return false;
 }
 
-static void UpdateFaults(uint32_t now, bool mute_pressed)
+static void HandleButtons(uint32_t now, bool mute_pressed, bool test_pressed,
+                          bool charge_pressed, bool *manual_test_request)
+{
+  bool modifier_held = power.mute_button.stable == GPIO_PIN_RESET;
+
+  (void)now;
+  *manual_test_request = false;
+
+  if (test_pressed && modifier_held)
+  {
+    power.boost_forced_off = !power.boost_forced_off;
+    if (power.boost_forced_off && power.mode == POWER_MODE_MANUAL_TEST)
+      power.mode = power.input_valid ? POWER_MODE_NORMAL : POWER_MODE_BACKUP;
+  }
+  else if (test_pressed)
+  {
+    *manual_test_request = true;
+  }
+
+  if (charge_pressed && modifier_held)
+  {
+    power.output_forced_off = !power.output_forced_off;
+  }
+  else if (charge_pressed && power.mode == POWER_MODE_NORMAL)
+  {
+    power.charge_requested = !power.charge_requested;
+    power.charge_full_since = 0U;
+  }
+
+  if (mute_pressed && power.alarm_faults != 0U)
+    power.alarm_muted = true;
+}
+
+static void UpdateMode(uint32_t now, bool charge_complete, bool manual_test_request)
+{
+  switch (power.mode)
+  {
+    case POWER_MODE_STARTUP_CHARGE:
+      if (charge_complete)
+      {
+        power.mode = POWER_MODE_STARTUP_BOOST_SETTLE;
+        power.boost_settle_started_at = now;
+      }
+      break;
+
+    case POWER_MODE_STARTUP_BOOST_SETTLE:
+      if ((now - power.boost_settle_started_at) >= POWER_BOOST_SETTLE_MS)
+      {
+        power.startup_complete = true;
+        if (power.input_valid)
+          power.mode = POWER_MODE_NORMAL;
+        else
+          EnterBackup();
+      }
+      break;
+
+    case POWER_MODE_NORMAL:
+      if (!power.input_valid)
+      {
+        EnterBackup();
+      }
+      else if (manual_test_request && !power.boost_forced_off &&
+               power.sc_mv >= POWER_SC_MANUAL_TEST_STOP_MV)
+      {
+        power.mode = POWER_MODE_MANUAL_TEST;
+      }
+      break;
+
+    case POWER_MODE_BACKUP:
+      if (power.input_valid)
+        power.mode = POWER_MODE_NORMAL;
+      break;
+
+    case POWER_MODE_MANUAL_TEST:
+      if (!power.input_valid)
+      {
+        EnterBackup();
+      }
+      else if (manual_test_request || power.boost_forced_off ||
+               power.sc_mv < POWER_SC_MANUAL_TEST_STOP_MV)
+      {
+        power.mode = POWER_MODE_NORMAL;
+      }
+      break;
+
+    default:
+      power.mode = POWER_MODE_STARTUP_CHARGE;
+      break;
+  }
+}
+
+static void ApplyPowerPath(void)
+{
+  bool allow_charge;
+  bool desired_boost;
+  bool main_input_enabled;
+
+  main_input_enabled = power.mode != POWER_MODE_BACKUP &&
+                       power.mode != POWER_MODE_MANUAL_TEST;
+  HAL_GPIO_WritePin(CTRL_DC_INPUT_GPIO_Port, CTRL_DC_INPUT_Pin,
+                    main_input_enabled ? GPIO_PIN_SET : GPIO_PIN_RESET);
+
+  allow_charge = power.mode == POWER_MODE_STARTUP_CHARGE ||
+                 power.mode == POWER_MODE_NORMAL;
+  power.charge_enabled = power.charge_requested && power.input_valid && allow_charge;
+
+  desired_boost = !power.charge_enabled && !power.boost_forced_off;
+  if ((power.mode == POWER_MODE_BACKUP || power.mode == POWER_MODE_MANUAL_TEST) &&
+      power.sc_mv < POWER_SC_BACKUP_CUTOFF_MV)
+    desired_boost = false;
+
+  /* Always turn one converter off before enabling the other. This guarantees
+   * that charger and BOOST can never be active together. */
+  if (power.charge_enabled)
+  {
+    HAL_GPIO_WritePin(SC_OUTPUT_EN_GPIO_Port, SC_OUTPUT_EN_Pin, GPIO_PIN_RESET);
+    power.boost_enabled = false;
+    HAL_GPIO_WritePin(SC_CHARGE_EN_GPIO_Port, SC_CHARGE_EN_Pin, GPIO_PIN_SET);
+  }
+  else
+  {
+    HAL_GPIO_WritePin(SC_CHARGE_EN_GPIO_Port, SC_CHARGE_EN_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(SC_OUTPUT_EN_GPIO_Port, SC_OUTPUT_EN_Pin,
+                      desired_boost ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    power.boost_enabled = desired_boost;
+  }
+}
+
+static void UpdateOutputEnable(void)
+{
+  if (!power.startup_complete || power.output_forced_off)
+  {
+    power.output_enabled = false;
+  }
+  else if (!power.output_enabled && power.bus_mv >= POWER_OUTPUT_ENABLE_MV &&
+           !power.output_high)
+  {
+    power.output_enabled = true;
+  }
+  else if (power.output_enabled && power.bus_mv < POWER_OUTPUT_DISABLE_MV)
+  {
+    power.output_enabled = false;
+  }
+
+  HAL_GPIO_WritePin(CTRL_DC_OUTPUT_GPIO_Port, CTRL_DC_OUTPUT_Pin,
+                    power.output_enabled ? GPIO_PIN_SET : GPIO_PIN_RESET);
+}
+
+static void UpdateFaults(uint32_t now)
 {
   uint32_t alarm_faults;
 
@@ -396,76 +492,35 @@ static void UpdateFaults(uint32_t now, bool mute_pressed)
     power.alarm_muted = false;
   if (alarm_faults == 0U)
     power.alarm_muted = false;
-  else if (mute_pressed)
-    power.alarm_muted = true;
   power.alarm_faults = alarm_faults;
   HAL_GPIO_WritePin(BEEP_GPIO_Port, BEEP_Pin,
-                    (alarm_faults != 0U && !power.alarm_muted) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+                    (alarm_faults != 0U && !power.alarm_muted) ?
+                    GPIO_PIN_SET : GPIO_PIN_RESET);
 
   if (power.faults != 0U && power.previous_faults == 0U)
   {
     ++power.record.fault_count;
     power.record.last_faults = power.faults;
-    RecordSave();
+    power.record_dirty = true;
   }
   power.previous_faults = power.faults;
 }
 
-static void UpdateOutputEnable(void)
+static void UpdateIndicators(void)
 {
-  if (!power.output_enabled && power.bus_mv >= POWER_OUTPUT_ENABLE_MV && !power.output_high)
-    power.output_enabled = true;
-  else if (power.output_enabled && power.bus_mv < POWER_OUTPUT_DISABLE_MV)
-    power.output_enabled = false;
-
-  HAL_GPIO_WritePin(CTRL_DC_OUTPUT_GPIO_Port, CTRL_DC_OUTPUT_Pin,
-                    power.output_enabled ? GPIO_PIN_SET : GPIO_PIN_RESET);
-}
-
-static void UpdateIndicators(uint32_t now)
-{
-  uint32_t sc_percent;
-  uint32_t blink_period;
-  uint32_t breath;
-  bool system_on;
-  bool sc_led_on;
-
-  if (power.faults != 0U)
-  {
-    system_on = ((now / 250U) & 1U) == 0U;
-  }
-  else
-  {
-    breath = (now / 100U) % 20U;
-    breath = (breath <= 10U) ? breath : (20U - breath);
-    system_on = ((now / POWER_TASK_PERIOD_MS) % 10U) < breath;
-  }
-  SetLed(SYS_LED_GPIO_Port, SYS_LED_Pin, system_on);
-  SetLed(INPUT_LED_GPIO_Port, INPUT_LED_Pin, power.input_valid);
-
-  if (power.sc_mv >= POWER_SC_CHARGE_COMPLETE_MV)
-  {
-    sc_led_on = true;
-  }
-  else if (power.sc_mv <= POWER_SC_BACKUP_CUTOFF_MV)
-  {
-    sc_led_on = false;
-  }
-  else
-  {
-    sc_percent = ((power.sc_mv - POWER_SC_BACKUP_CUTOFF_MV) * 100U) /
-                 (POWER_SC_CHARGE_COMPLETE_MV - POWER_SC_BACKUP_CUTOFF_MV);
-    blink_period = 1200U - (sc_percent * 9U);
-    sc_led_on = (now % blink_period) < (blink_period / 2U);
-  }
-  SetLed(SC_LED_GPIO_Port, SC_LED_Pin, sc_led_on);
+  LedControl_SetSystem(power.faults != 0U);
+  LedControl_SetLed5(power.input_valid, power.charge_enabled,
+                    power.mode == POWER_MODE_MANUAL_TEST);
+  LedControl_SetSupercap(power.sc_mv);
 
   HAL_GPIO_WritePin(STATUS_INPUT_GPIO_Port, STATUS_INPUT_Pin,
                     power.input_valid ? GPIO_PIN_SET : GPIO_PIN_RESET);
   HAL_GPIO_WritePin(STATUS_SC_READY_GPIO_Port, STATUS_SC_READY_Pin,
-                    power.sc_mv >= POWER_SC_MANUAL_TEST_STOP_MV ? GPIO_PIN_SET : GPIO_PIN_RESET);
+                    power.sc_mv >= POWER_SC_MANUAL_TEST_STOP_MV ?
+                    GPIO_PIN_SET : GPIO_PIN_RESET);
   HAL_GPIO_WritePin(STATUS_BACKUP_GPIO_Port, STATUS_BACKUP_Pin,
-                    (power.mode == POWER_MODE_BACKUP || power.mode == POWER_MODE_MANUAL_TEST) ?
+                    (power.mode == POWER_MODE_BACKUP ||
+                     power.mode == POWER_MODE_MANUAL_TEST) ?
                     GPIO_PIN_SET : GPIO_PIN_RESET);
   HAL_GPIO_WritePin(STATUS_FAULT_GPIO_Port, STATUS_FAULT_Pin,
                     power.faults != 0U ? GPIO_PIN_SET : GPIO_PIN_RESET);
@@ -478,17 +533,35 @@ static const char *ModeName(PowerMode mode)
 {
   switch (mode)
   {
+    case POWER_MODE_STARTUP_CHARGE: return "STARTUP_CHARGE";
+    case POWER_MODE_STARTUP_BOOST_SETTLE: return "STARTUP_BOOST";
     case POWER_MODE_NORMAL: return "NORMAL";
     case POWER_MODE_BACKUP: return "BACKUP";
     case POWER_MODE_MANUAL_TEST: return "MANUAL_TEST";
-    case POWER_MODE_TRANSFER_TO_MAIN: return "TRANSFER";
     default: return "UNKNOWN";
   }
 }
 
+static void UpdateDebugSnapshot(void)
+{
+  g_power_debug.input_mv = power.input_mv;
+  g_power_debug.bus_mv = power.bus_mv;
+  g_power_debug.sc_mv = power.sc_mv;
+  g_power_debug.faults = power.faults;
+  g_power_debug.mode = (uint32_t)power.mode;
+  g_power_debug.input_valid = power.input_valid ? 1U : 0U;
+  g_power_debug.boost_enabled = power.boost_enabled ? 1U : 0U;
+  g_power_debug.charge_enabled = power.charge_enabled ? 1U : 0U;
+  g_power_debug.output_enabled = power.output_enabled ? 1U : 0U;
+  g_power_debug.boost_forced_off = power.boost_forced_off ? 1U : 0U;
+  g_power_debug.output_forced_off = power.output_forced_off ? 1U : 0U;
+  g_power_debug.startup_complete = power.startup_complete ? 1U : 0U;
+  g_power_debug.alarm_muted = power.alarm_muted ? 1U : 0U;
+}
+
 static void PrintTelemetry(uint32_t now)
 {
-  char line[224];
+  char line[288];
   int length;
 
   if ((now - power.telemetry_at) < POWER_TELEMETRY_PERIOD_MS)
@@ -496,13 +569,22 @@ static void PrintTelemetry(uint32_t now)
   power.telemetry_at = now;
   length = snprintf(line, sizeof(line),
                     "SPM input=%lu.%03luV bus=%lu.%03luV sc=%lu.%03luV mode=%s "
-                    "charge=%u output=%u faults=0x%02lX muted=%u counts=%lu/%lu\r\n",
-                    (unsigned long)(power.input_mv / 1000U), (unsigned long)(power.input_mv % 1000U),
-                    (unsigned long)(power.bus_mv / 1000U), (unsigned long)(power.bus_mv % 1000U),
-                    (unsigned long)(power.sc_mv / 1000U), (unsigned long)(power.sc_mv % 1000U),
-                    ModeName(power.mode), power.charge_enabled ? 1U : 0U,
-                    power.output_enabled ? 1U : 0U, (unsigned long)power.faults,
-                    power.alarm_muted ? 1U : 0U, (unsigned long)power.record.fault_count,
+                    "boost=%u charge=%u output=%u force_boost_off=%u force_output_off=%u "
+                    "faults=0x%02lX muted=%u counts=%lu/%lu\r\n",
+                    (unsigned long)(power.input_mv / 1000U),
+                    (unsigned long)(power.input_mv % 1000U),
+                    (unsigned long)(power.bus_mv / 1000U),
+                    (unsigned long)(power.bus_mv % 1000U),
+                    (unsigned long)(power.sc_mv / 1000U),
+                    (unsigned long)(power.sc_mv % 1000U),
+                    ModeName(power.mode), power.boost_enabled ? 1U : 0U,
+                    power.charge_enabled ? 1U : 0U,
+                    power.output_enabled ? 1U : 0U,
+                    power.boost_forced_off ? 1U : 0U,
+                    power.output_forced_off ? 1U : 0U,
+                    (unsigned long)power.faults,
+                    power.alarm_muted ? 1U : 0U,
+                    (unsigned long)power.record.fault_count,
                     (unsigned long)power.record.backup_count);
   if (length > 0)
   {
@@ -512,24 +594,32 @@ static void PrintTelemetry(uint32_t now)
   }
 }
 
-void PowerControl_Init(ADC_HandleTypeDef *hadc, I2C_HandleTypeDef *hi2c)
+void PowerControl_Init(ADC_HandleTypeDef *hadc, I2C_HandleTypeDef *hi2c,
+                       TIM_HandleTypeDef *htim_led)
 {
   uint32_t now = osKernelGetTickCount();
 
   memset(&power, 0, sizeof(power));
+  memset((void *)&g_power_debug, 0, sizeof(g_power_debug));
   power.hadc = hadc;
   power.hi2c = hi2c;
-  power.mode = POWER_MODE_NORMAL;
-  power.mute_button = (Button){BTN1_GPIO_Port, BTN1_Pin, GPIO_PIN_SET, GPIO_PIN_SET, now};
-  power.test_button = (Button){BTN2_GPIO_Port, BTN2_Pin, GPIO_PIN_SET, GPIO_PIN_SET, now};
-  power.charge_button = (Button){BTN3_GPIO_Port, BTN3_Pin, GPIO_PIN_SET, GPIO_PIN_SET, now};
+  power.mode = POWER_MODE_STARTUP_CHARGE;
+  power.charge_requested = true;
+  power.mute_button = (Button){BTN1_GPIO_Port, BTN1_Pin,
+                               GPIO_PIN_SET, GPIO_PIN_SET, now};
+  power.test_button = (Button){BTN2_GPIO_Port, BTN2_Pin,
+                               GPIO_PIN_SET, GPIO_PIN_SET, now};
+  power.charge_button = (Button){BTN3_GPIO_Port, BTN3_Pin,
+                                 GPIO_PIN_SET, GPIO_PIN_SET, now};
 
   HAL_GPIO_WritePin(CTRL_DC_INPUT_GPIO_Port, CTRL_DC_INPUT_Pin, GPIO_PIN_SET);
   HAL_GPIO_WritePin(CTRL_DC_OUTPUT_GPIO_Port, CTRL_DC_OUTPUT_Pin, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(SC_CHARGE_EN_GPIO_Port, SC_CHARGE_EN_Pin, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(SC_OUTPUT_EN_GPIO_Port, SC_OUTPUT_EN_Pin, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(BEEP_GPIO_Port, BEEP_Pin, GPIO_PIN_RESET);
+  LedControl_Init(htim_led);
   RecordLoad();
+  UpdateDebugSnapshot();
 }
 
 void PowerControl_Run(void)
@@ -538,15 +628,26 @@ void PowerControl_Run(void)
   bool mute_pressed;
   bool test_pressed;
   bool charge_pressed;
+  bool manual_test_request;
+  bool charge_complete;
 
   UpdateMeasurements(now);
   mute_pressed = ButtonPressed(&power.mute_button, now);
   test_pressed = ButtonPressed(&power.test_button, now);
   charge_pressed = ButtonPressed(&power.charge_button, now);
-  UpdateMode(now, test_pressed);
-  UpdateCharge(now, charge_pressed);
+  HandleButtons(now, mute_pressed, test_pressed, charge_pressed,
+                &manual_test_request);
+  charge_complete = UpdateChargeCompletion(now);
+  UpdateMode(now, charge_complete, manual_test_request);
+  ApplyPowerPath();
   UpdateOutputEnable();
-  UpdateFaults(now, mute_pressed);
-  UpdateIndicators(now);
+  UpdateFaults(now);
+  UpdateIndicators();
+  UpdateDebugSnapshot();
   PrintTelemetry(now);
+
+  /* EEPROM writes are deliberately last: a slow or absent EEPROM must never
+   * delay BOOST activation or a load-disconnect safety action. */
+  if (power.record_dirty)
+    RecordSave();
 }

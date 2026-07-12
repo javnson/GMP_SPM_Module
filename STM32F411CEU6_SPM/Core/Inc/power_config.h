@@ -6,7 +6,7 @@
 #define POWER_TELEMETRY_PERIOD_MS          2000U
 #define POWER_STARTUP_GRACE_MS             2000U
 #define POWER_INPUT_DEBOUNCE_MS              80U
-#define POWER_TRANSFER_OVERLAP_MS           200U
+#define POWER_BOOST_SETTLE_MS               200U
 #define POWER_BUTTON_DEBOUNCE_MS             30U
 
 #define POWER_ADC_REFERENCE_MV             3300U
@@ -17,6 +17,7 @@
 
 #define POWER_INPUT_UV_TRIP_MV             10500U
 #define POWER_INPUT_UV_RECOVER_MV          11000U
+#define POWER_INPUT_EMERGENCY_TRIP_MV       9000U
 #define POWER_OUTPUT_UV_TRIP_MV            10500U
 #define POWER_OUTPUT_UV_RECOVER_MV         11000U
 #define POWER_OUTPUT_OV_TRIP_MV            13000U
@@ -26,8 +27,7 @@
 
 #define POWER_SC_RATED_FULL_MV             10730U
 #define POWER_SC_CHARGE_COMPLETE_MV        10500U
-#define POWER_SC_CHARGE_REARM_MV           10200U
-#define POWER_SC_CHARGE_HOLD_MS            30000U
+#define POWER_SC_CHARGE_HOLD_MS             5000U
 #define POWER_SC_MANUAL_TEST_STOP_MV        5000U
 #define POWER_SC_BACKUP_CUTOFF_MV           4500U
 
@@ -38,5 +38,11 @@
 #define POWER_EEPROM_I2C_ADDRESS          (0x50U << 1U)
 #define POWER_EEPROM_TIMEOUT_MS              50U
 #define POWER_EEPROM_WRITE_CYCLE_MS           6U
+
+#define POWER_LED_TIMER_FREQUENCY_HZ       10000U
+#define POWER_LED_PWM_STEPS                   50U
+#define POWER_SYS_BREATHE_PERIOD_MS         2000U
+#define POWER_FAULT_BLINK_PERIOD_MS          500U
+#define POWER_LED5_PATTERN_PERIOD_MS        1000U
 
 #endif /* POWER_CONFIG_H */
