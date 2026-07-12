@@ -8,6 +8,7 @@ typedef struct
   uint32_t input_mv;
   uint32_t bus_mv;
   uint32_t sc_mv;
+  uint32_t sc_energy_percent;
   uint32_t faults;
   uint32_t mode;
   uint32_t input_valid;
@@ -18,6 +19,8 @@ typedef struct
   uint32_t output_forced_off;
   uint32_t startup_complete;
   uint32_t alarm_muted;
+  uint32_t low_energy_warning;
+  uint32_t buzzer_mode;
 } PowerDebugSnapshot;
 
 extern volatile PowerDebugSnapshot g_power_debug;

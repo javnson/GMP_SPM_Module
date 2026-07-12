@@ -9,6 +9,6 @@
 void LedControl_Init(TIM_HandleTypeDef *htim);
 void LedControl_SetSystem(bool fault_active);
 void LedControl_SetLed5(bool input_valid, bool charging, bool manual_test);
-void LedControl_SetSupercap(uint32_t sc_mv);
+void LedControl_SetSupercapEnergy(uint32_t energy_percent);
 
 #endif /* LED_CONTROL_H */

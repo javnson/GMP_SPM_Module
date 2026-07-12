@@ -8,6 +8,7 @@ typedef enum
   LED_PATTERN_OFF = 0,
   LED_PATTERN_ON,
   LED_PATTERN_BREATHE,
+  LED_PATTERN_ENERGY_BREATHE,
   LED_PATTERN_BLINK
 } LedPattern;
 
@@ -16,6 +17,7 @@ typedef struct
   volatile uint32_t pattern;
   volatile uint32_t period_ms;
   volatile uint32_t on_ms;
+  volatile uint32_t level_percent;
 } LedCommand;
 
 static LedCommand system_led;
@@ -26,10 +28,12 @@ static uint32_t timer_subtick;
 static uint32_t pwm_phase;
 
 static void SetCommand(LedCommand *command, LedPattern pattern,
-                       uint32_t period_ms, uint32_t on_ms)
+                       uint32_t period_ms, uint32_t on_ms,
+                       uint32_t level_percent)
 {
   command->period_ms = period_ms;
   command->on_ms = on_ms;
+  command->level_percent = level_percent;
   command->pattern = (uint32_t)pattern;
 }
 
@@ -68,6 +72,8 @@ static bool Render(const LedCommand *command)
 
   /* Quadratic gamma correction gives a visually smooth brightness ramp. */
   duty = (level * level + (POWER_LED_PWM_STEPS / 2U)) / POWER_LED_PWM_STEPS;
+  if (pattern == (uint32_t)LED_PATTERN_ENERGY_BREATHE)
+    duty = (duty * command->level_percent + 50U) / 100U;
   return pwm_phase < duty;
 }
 
@@ -76,9 +82,9 @@ void LedControl_Init(TIM_HandleTypeDef *htim)
   led_time_ms = 0U;
   timer_subtick = 0U;
   pwm_phase = 0U;
-  SetCommand(&system_led, LED_PATTERN_OFF, 0U, 0U);
-  SetCommand(&led5, LED_PATTERN_OFF, 0U, 0U);
-  SetCommand(&sc_led, LED_PATTERN_OFF, 0U, 0U);
+  SetCommand(&system_led, LED_PATTERN_OFF, 0U, 0U, 0U);
+  SetCommand(&led5, LED_PATTERN_OFF, 0U, 0U, 0U);
+  SetCommand(&sc_led, LED_PATTERN_OFF, 0U, 0U, 0U);
   WriteActiveLow(SYS_LED_GPIO_Port, SYS_LED_Pin, false);
   WriteActiveLow(INPUT_LED_GPIO_Port, INPUT_LED_Pin, false);
   WriteActiveLow(SC_LED_GPIO_Port, SC_LED_Pin, false);
@@ -90,44 +96,36 @@ void LedControl_SetSystem(bool fault_active)
 {
   if (fault_active)
     SetCommand(&system_led, LED_PATTERN_BLINK, POWER_FAULT_BLINK_PERIOD_MS,
-               POWER_FAULT_BLINK_PERIOD_MS / 2U);
+               POWER_FAULT_BLINK_PERIOD_MS / 2U, 100U);
   else
-    SetCommand(&system_led, LED_PATTERN_BREATHE, POWER_SYS_BREATHE_PERIOD_MS, 0U);
+    SetCommand(&system_led, LED_PATTERN_BREATHE, POWER_SYS_BREATHE_PERIOD_MS,
+               0U, 100U);
 }
 
 void LedControl_SetLed5(bool input_valid, bool charging, bool manual_test)
 {
   if (!input_valid)
-    SetCommand(&led5, LED_PATTERN_OFF, 0U, 0U);
+    SetCommand(&led5, LED_PATTERN_OFF, 0U, 0U, 0U);
   else if (manual_test)
     SetCommand(&led5, LED_PATTERN_BLINK, POWER_LED5_PATTERN_PERIOD_MS,
-               POWER_LED5_PATTERN_PERIOD_MS / 5U);
+               POWER_LED5_PATTERN_PERIOD_MS / 5U, 100U);
   else if (charging)
     SetCommand(&led5, LED_PATTERN_BLINK, POWER_LED5_PATTERN_PERIOD_MS,
-               POWER_LED5_PATTERN_PERIOD_MS / 2U);
+               POWER_LED5_PATTERN_PERIOD_MS / 2U, 100U);
   else
-    SetCommand(&led5, LED_PATTERN_ON, 0U, 0U);
+    SetCommand(&led5, LED_PATTERN_ON, 0U, 0U, 100U);
 }
 
-void LedControl_SetSupercap(uint32_t sc_mv)
+void LedControl_SetSupercapEnergy(uint32_t energy_percent)
 {
-  uint32_t percent;
-  uint32_t on_ms;
-
-  if (sc_mv >= POWER_SC_CHARGE_COMPLETE_MV)
-  {
-    SetCommand(&sc_led, LED_PATTERN_ON, 0U, 0U);
-  }
-  else if (sc_mv <= POWER_SC_BACKUP_CUTOFF_MV)
-  {
-    SetCommand(&sc_led, LED_PATTERN_OFF, 0U, 0U);
-  }
+  if (energy_percent == 0U)
+    SetCommand(&sc_led, LED_PATTERN_OFF, 0U, 0U, 0U);
   else
   {
-    percent = ((sc_mv - POWER_SC_BACKUP_CUTOFF_MV) * 100U) /
-              (POWER_SC_CHARGE_COMPLETE_MV - POWER_SC_BACKUP_CUTOFF_MV);
-    on_ms = (percent * POWER_SC_LED_PERIOD_MS) / 100U;
-    SetCommand(&sc_led, LED_PATTERN_BLINK, POWER_SC_LED_PERIOD_MS, on_ms);
+    if (energy_percent > 100U)
+      energy_percent = 100U;
+    SetCommand(&sc_led, LED_PATTERN_ENERGY_BREATHE,
+               POWER_SYS_BREATHE_PERIOD_MS, 0U, energy_percent);
   }
 }
 

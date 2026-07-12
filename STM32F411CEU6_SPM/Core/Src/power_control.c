@@ -56,6 +56,7 @@ typedef struct
   uint32_t input_sample_mv;
   uint32_t bus_mv;
   uint32_t sc_mv;
+  uint32_t sc_energy_percent;
   uint32_t faults;
   uint32_t previous_faults;
   uint32_t alarm_faults;
@@ -67,6 +68,7 @@ typedef struct
   uint32_t input_valid_since;
   uint32_t rapid_drop_reference_mv;
   uint32_t rapid_drop_reference_at;
+  uint32_t buzzer_mode;
   bool input_valid;
   bool output_low;
   bool output_high;
@@ -81,6 +83,7 @@ typedef struct
   bool adc_failed;
   bool measurements_initialized;
   bool record_dirty;
+  bool low_energy_warning;
   PowerMode mode;
   Button mute_button;
   Button test_button;
@@ -178,6 +181,24 @@ static uint32_t FilterVoltage(uint32_t old_value, uint32_t new_value)
   return (old_value == 0U) ? new_value : ((old_value * 3U + new_value + 2U) / 4U);
 }
 
+static uint32_t SupercapEnergyPercent(uint32_t sc_mv)
+{
+  uint64_t voltage_squared;
+  uint64_t cutoff_squared =
+      (uint64_t)POWER_SC_BACKUP_CUTOFF_MV * POWER_SC_BACKUP_CUTOFF_MV;
+  uint64_t full_squared =
+      (uint64_t)POWER_SC_CHARGE_COMPLETE_MV * POWER_SC_CHARGE_COMPLETE_MV;
+
+  if (sc_mv <= POWER_SC_BACKUP_CUTOFF_MV)
+    return 0U;
+  if (sc_mv >= POWER_SC_CHARGE_COMPLETE_MV)
+    return 100U;
+
+  voltage_squared = (uint64_t)sc_mv * sc_mv;
+  return (uint32_t)(((voltage_squared - cutoff_squared) * 100U) /
+                    (full_squared - cutoff_squared));
+}
+
 static bool ButtonPressed(Button *button, uint32_t now)
 {
   GPIO_PinState sample = HAL_GPIO_ReadPin(button->port, button->pin);
@@ -220,6 +241,7 @@ static void UpdateMeasurements(uint32_t now)
       power.input_mv = FilterVoltage(power.input_mv, power.input_sample_mv);
       power.bus_mv = FilterVoltage(power.bus_mv, bus_sample);
     }
+    power.sc_energy_percent = SupercapEnergyPercent(power.sc_mv);
   }
 
   /* An emergency raw threshold bypasses the normal debounce so BOOST can take
@@ -345,7 +367,8 @@ static void HandleButtons(uint32_t now, bool mute_pressed, bool test_pressed,
     power.charge_full_since = 0U;
   }
 
-  if (mute_pressed && power.alarm_faults != 0U)
+  if (mute_pressed &&
+      (power.alarm_faults != 0U || power.low_energy_warning))
     power.alarm_muted = true;
 }
 
@@ -490,12 +513,9 @@ static void UpdateFaults(uint32_t now)
                                   POWER_FAULT_OUTPUT_HIGH);
   if ((alarm_faults & ~power.alarm_faults) != 0U)
     power.alarm_muted = false;
-  if (alarm_faults == 0U)
+  if (alarm_faults == 0U && !power.low_energy_warning)
     power.alarm_muted = false;
   power.alarm_faults = alarm_faults;
-  HAL_GPIO_WritePin(BEEP_GPIO_Port, BEEP_Pin,
-                    (alarm_faults != 0U && !power.alarm_muted) ?
-                    GPIO_PIN_SET : GPIO_PIN_RESET);
 
   if (power.faults != 0U && power.previous_faults == 0U)
   {
@@ -506,12 +526,62 @@ static void UpdateFaults(uint32_t now)
   power.previous_faults = power.faults;
 }
 
+static void UpdateBuzzer(uint32_t now)
+{
+  uint32_t phase;
+  uint32_t pulse_slot;
+  uint32_t pulse_train_ms;
+  bool low_energy_warning;
+  bool beep_on = false;
+
+  low_energy_warning =
+      power.output_enabled &&
+      (power.mode == POWER_MODE_BACKUP ||
+       power.mode == POWER_MODE_MANUAL_TEST) &&
+      power.sc_energy_percent <= POWER_SC_LOW_ENERGY_WARNING_PERCENT;
+
+  if (low_energy_warning && !power.low_energy_warning)
+    power.alarm_muted = false;
+  power.low_energy_warning = low_energy_warning;
+
+  if (!power.output_enabled)
+  {
+    power.buzzer_mode = 0U;
+  }
+  else if (low_energy_warning)
+  {
+    power.buzzer_mode = 2U;
+    if (!power.alarm_muted)
+    {
+      phase = now % POWER_LOW_ENERGY_BEEP_PERIOD_MS;
+      pulse_slot = POWER_LOW_ENERGY_BEEP_ON_MS +
+                   POWER_LOW_ENERGY_BEEP_GAP_MS;
+      pulse_train_ms = pulse_slot * POWER_LOW_ENERGY_BEEP_COUNT;
+      if (phase < pulse_train_ms &&
+          (phase % pulse_slot) < POWER_LOW_ENERGY_BEEP_ON_MS)
+        beep_on = true;
+    }
+  }
+  else if (power.alarm_faults != 0U && !power.alarm_muted)
+  {
+    power.buzzer_mode = 1U;
+    beep_on = true;
+  }
+  else
+  {
+    power.buzzer_mode = 0U;
+  }
+
+  HAL_GPIO_WritePin(BEEP_GPIO_Port, BEEP_Pin,
+                    beep_on ? GPIO_PIN_SET : GPIO_PIN_RESET);
+}
+
 static void UpdateIndicators(void)
 {
   LedControl_SetSystem(power.faults != 0U);
   LedControl_SetLed5(power.input_valid, power.charge_enabled,
                     power.mode == POWER_MODE_MANUAL_TEST);
-  LedControl_SetSupercap(power.sc_mv);
+  LedControl_SetSupercapEnergy(power.sc_energy_percent);
 
   HAL_GPIO_WritePin(STATUS_INPUT_GPIO_Port, STATUS_INPUT_Pin,
                     power.input_valid ? GPIO_PIN_SET : GPIO_PIN_RESET);
@@ -547,6 +617,7 @@ static void UpdateDebugSnapshot(void)
   g_power_debug.input_mv = power.input_mv;
   g_power_debug.bus_mv = power.bus_mv;
   g_power_debug.sc_mv = power.sc_mv;
+  g_power_debug.sc_energy_percent = power.sc_energy_percent;
   g_power_debug.faults = power.faults;
   g_power_debug.mode = (uint32_t)power.mode;
   g_power_debug.input_valid = power.input_valid ? 1U : 0U;
@@ -557,32 +628,36 @@ static void UpdateDebugSnapshot(void)
   g_power_debug.output_forced_off = power.output_forced_off ? 1U : 0U;
   g_power_debug.startup_complete = power.startup_complete ? 1U : 0U;
   g_power_debug.alarm_muted = power.alarm_muted ? 1U : 0U;
+  g_power_debug.low_energy_warning = power.low_energy_warning ? 1U : 0U;
+  g_power_debug.buzzer_mode = power.buzzer_mode;
 }
 
 static void PrintTelemetry(uint32_t now)
 {
-  char line[288];
+  char line[320];
   int length;
 
   if ((now - power.telemetry_at) < POWER_TELEMETRY_PERIOD_MS)
     return;
   power.telemetry_at = now;
   length = snprintf(line, sizeof(line),
-                    "SPM input=%lu.%03luV bus=%lu.%03luV sc=%lu.%03luV mode=%s "
+                    "SPM input=%lu.%03luV bus=%lu.%03luV sc=%lu.%03luV energy=%lu%% mode=%s "
                     "boost=%u charge=%u output=%u force_boost_off=%u force_output_off=%u "
-                    "faults=0x%02lX muted=%u counts=%lu/%lu\r\n",
+                    "faults=0x%02lX buzzer=%lu muted=%u counts=%lu/%lu\r\n",
                     (unsigned long)(power.input_mv / 1000U),
                     (unsigned long)(power.input_mv % 1000U),
                     (unsigned long)(power.bus_mv / 1000U),
                     (unsigned long)(power.bus_mv % 1000U),
                     (unsigned long)(power.sc_mv / 1000U),
                     (unsigned long)(power.sc_mv % 1000U),
+                    (unsigned long)power.sc_energy_percent,
                     ModeName(power.mode), power.boost_enabled ? 1U : 0U,
                     power.charge_enabled ? 1U : 0U,
                     power.output_enabled ? 1U : 0U,
                     power.boost_forced_off ? 1U : 0U,
                     power.output_forced_off ? 1U : 0U,
                     (unsigned long)power.faults,
+                    (unsigned long)power.buzzer_mode,
                     power.alarm_muted ? 1U : 0U,
                     (unsigned long)power.record.fault_count,
                     (unsigned long)power.record.backup_count);
@@ -642,6 +717,7 @@ void PowerControl_Run(void)
   ApplyPowerPath();
   UpdateOutputEnable();
   UpdateFaults(now);
+  UpdateBuzzer(now);
   UpdateIndicators();
   UpdateDebugSnapshot();
   PrintTelemetry(now);
