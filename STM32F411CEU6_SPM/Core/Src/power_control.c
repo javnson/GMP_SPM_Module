@@ -361,7 +361,9 @@ static void HandleButtons(uint32_t now, bool mute_pressed, bool test_pressed,
   {
     power.output_forced_off = !power.output_forced_off;
   }
-  else if (charge_pressed && power.mode == POWER_MODE_NORMAL)
+  else if (charge_pressed &&
+           (power.mode == POWER_MODE_STARTUP_CHARGE ||
+            power.mode == POWER_MODE_NORMAL))
   {
     power.charge_requested = !power.charge_requested;
     power.charge_full_since = 0U;
@@ -622,6 +624,7 @@ static void UpdateDebugSnapshot(void)
   g_power_debug.mode = (uint32_t)power.mode;
   g_power_debug.input_valid = power.input_valid ? 1U : 0U;
   g_power_debug.boost_enabled = power.boost_enabled ? 1U : 0U;
+  g_power_debug.charge_requested = power.charge_requested ? 1U : 0U;
   g_power_debug.charge_enabled = power.charge_enabled ? 1U : 0U;
   g_power_debug.output_enabled = power.output_enabled ? 1U : 0U;
   g_power_debug.boost_forced_off = power.boost_forced_off ? 1U : 0U;
@@ -642,7 +645,7 @@ static void PrintTelemetry(uint32_t now)
   power.telemetry_at = now;
   length = snprintf(line, sizeof(line),
                     "SPM input=%lu.%03luV bus=%lu.%03luV sc=%lu.%03luV energy=%lu%% mode=%s "
-                    "boost=%u charge=%u output=%u force_boost_off=%u force_output_off=%u "
+                    "boost=%u charge_req=%u charge=%u output=%u force_boost_off=%u force_output_off=%u "
                     "faults=0x%02lX buzzer=%lu muted=%u counts=%lu/%lu\r\n",
                     (unsigned long)(power.input_mv / 1000U),
                     (unsigned long)(power.input_mv % 1000U),
@@ -652,6 +655,7 @@ static void PrintTelemetry(uint32_t now)
                     (unsigned long)(power.sc_mv % 1000U),
                     (unsigned long)power.sc_energy_percent,
                     ModeName(power.mode), power.boost_enabled ? 1U : 0U,
+                    power.charge_requested ? 1U : 0U,
                     power.charge_enabled ? 1U : 0U,
                     power.output_enabled ? 1U : 0U,
                     power.boost_forced_off ? 1U : 0U,

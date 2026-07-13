@@ -24,11 +24,16 @@ BOOST 备电、用户输出控制、故障报警、EEPROM 事件计数和 USB CD
 | --- | --- | --- | --- |
 | K1 / BTN1 | PB5 | 当前报警已经触发时关闭蜂鸣器；没有报警时不起作用 | 作为组合键修饰键 |
 | K2 / BTN2 | PB4 | 进入或退出强制 SC 供电测试；SC 低于 5.0 V 自动退出 | 切换 boost_forced_off，强制关闭/恢复 BOOST |
-| K3 / BTN3 | PA15 | 正常模式下切换超级电容充电请求 | 切换 output_forced_off，强制关闭/恢复用户输出 |
+| K3 / BTN3 | PA15 | 启动充电或正常模式下切换超级电容充电请求 | 切换 output_forced_off，强制关闭/恢复用户输出 |
 
 组合键操作方法：先按住 K1，短按一次 K2 或 K3，再松开 K1。组合功能是
-锁存式切换，再次执行同一组合键即可恢复。启动充电阶段会忽略 K2/K3 的普通
-单键操作，但组合键仍可用于安全强制控制。
+锁存式切换，再次执行同一组合键即可恢复。启动充电阶段会忽略 K2 的普通
+单键操作，但允许单独按 K3 暂停或恢复首次充电；组合键仍可用于安全强制
+控制。
+
+首次充电阶段按 K3 暂停充电后，系统保持在 STARTUP_CHARGE，用户输出继续
+断开，充满确认计时清零。再次按 K3 恢复充电，SC 达到 10.5 V 并连续保持
+5 s 后，系统才进入 BOOST 建立和用户输出启动流程。
 
 新的报警条件出现时会自动取消之前的静音，蜂鸣器重新报警。
 
@@ -116,6 +121,7 @@ BOOST 备电、用户输出控制、故障报警、EEPROM 事件计数和 USB CD
 
 | 当前状态 | 触发条件 | 下一状态 | 主要动作 |
 | --- | --- | --- | --- |
+| STARTUP_CHARGE | 单独按 K3 | STARTUP_CHARGE | 暂停或恢复首次充电，用户输出保持断开 |
 | STARTUP_CHARGE | SC 连续高于或等于 10.5 V 达 5 s | STARTUP_BOOST_SETTLE | 关闭充电器、启动 BOOST |
 | STARTUP_BOOST_SETTLE | BOOST 已运行 200 ms | NORMAL 或 BACKUP | 设置 startup_complete，允许用户输出 |
 | NORMAL | 外部输入无效 | BACKUP | 关闭主输入路径，BOOST 已经处于运行状态 |
@@ -162,6 +168,7 @@ BOOST 备电、用户输出控制、故障报警、EEPROM 事件计数和 USB CD
 | mode | 当前状态机状态，取值见上表 |
 | input_valid | 外部 12 V 输入是否有效 |
 | boost_enabled | BOOST 控制输出是否实际使能 |
+| charge_requested | K3 锁存的充电请求；首次充电阶段也可切换 |
 | charge_enabled | 充电控制输出是否实际使能 |
 | output_enabled | 用户输出控制是否实际使能 |
 | boost_forced_off | K1+K2 强制关闭 BOOST 的锁存状态 |
@@ -202,7 +209,7 @@ USB CDC 每 2 s 输出同样的信息，包括三路电压、状态机模式、B
 典型输出如下：
 
     SPM input=12.031V bus=11.982V sc=10.512V energy=100% mode=NORMAL
-    boost=1 charge=0 output=1 force_boost_off=0 force_output_off=0
+    boost=1 charge_req=0 charge=0 output=1 force_boost_off=0 force_output_off=0
     faults=0x00 buzzer=0 muted=0 counts=2/1
 
 实际输出为一行，上面为了阅读进行了换行。字段含义：
@@ -215,6 +222,7 @@ USB CDC 每 2 s 输出同样的信息，包括三路电压、状态机模式、B
 | energy | 以 4.5 V 为可用能量零点、按 V² 计算的剩余能量百分比 |
 | mode | 当前状态机名称 |
 | boost | BOOST 实际使能状态 |
+| charge_req | K3 锁存的充电请求状态 |
 | charge | 充电器实际使能状态 |
 | output | 用户输出实际使能状态 |
 | force_boost_off | K1+K2 强制关闭 BOOST 的锁存状态 |
@@ -262,8 +270,10 @@ USB CDC 每 2 s 输出同样的信息，包括三路电压、状态机模式、B
 2. 确认 mode=0、charge_enabled=1、boost_enabled=0、
    output_enabled=0。
 3. 确认 LED5 为 1 s/50% 闪烁，用户输出端保持断开。
-4. SC 达到 10.5 V 时确认 LED4 达到 100% 峰值亮度呼吸。
-5. 从首次达到 10.5 V 开始计时，连续 5 s 后充电器应关闭。
+4. 单独按 K3，确认 charge_enabled=0、mode 和 output_enabled 不变；
+   再次按 K3 后确认 charge_enabled 恢复为 1。
+5. SC 达到 10.5 V 时确认 LED4 达到 100% 峰值亮度呼吸。
+6. 从首次达到 10.5 V 开始计时，连续 5 s 后充电器应关闭。
 
 如果保持期间 SC 重新低于 10.5 V，5 s 计时会清零并重新开始。
 充电过程中 LED4 的呼吸周期应保持约 2 s；随着 SC 储能增加，呼吸峰值亮度

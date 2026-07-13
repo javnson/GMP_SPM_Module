@@ -13,6 +13,7 @@ typedef struct
   uint32_t mode;
   uint32_t input_valid;
   uint32_t boost_enabled;
+  uint32_t charge_requested;
   uint32_t charge_enabled;
   uint32_t output_enabled;
   uint32_t boost_forced_off;
